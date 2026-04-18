@@ -5,6 +5,7 @@ package kafkaexporter // import "github.com/open-telemetry/opentelemetry-collect
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 
@@ -85,6 +86,11 @@ func (e *kafkaExporter[T]) Start(ctx context.Context, host component.Host) (err 
 		return err
 	}
 
+	partitionerOpt, err := buildPartitionerOpt(e.cfg.RecordPartitioner, host)
+	if err != nil {
+		return fmt.Errorf("failed to configure record partitioner: %w", err)
+	}
+
 	producer, err := kafka.NewFranzSyncProducer(
 		ctx,
 		host,
@@ -93,12 +99,15 @@ func (e *kafkaExporter[T]) Start(ctx context.Context, host component.Host) (err 
 		e.cfg.TimeoutSettings.Timeout,
 		e.logger,
 		kgo.WithHooks(kafkaclient.NewFranzProducerMetrics(tb)),
+		partitionerOpt,
 	)
 	if err != nil {
 		return err
 	}
 	e.producer = kafkaclient.NewFranzSyncProducer(producer,
 		e.cfg.IncludeMetadataKeys,
+		e.cfg.RecordHeaders,
+		e.cfg.Producer.MaxMessageBytes,
 	)
 	return nil
 }
@@ -158,6 +167,13 @@ func (e *kafkaExporter[T]) exportData(ctx context.Context, data T) error {
 				zap.Int("records", len(mi.Messages)),
 				zap.String("topic", mi.Topic),
 				zap.Error(err),
+			)
+		}
+		var msgTooLarge *kafkaclient.MessageTooLargeError
+		if errors.As(err, &msgTooLarge) {
+			e.logger.Error("kafka record exceeds max message size",
+				zap.Int("actual_message_bytes", msgTooLarge.RecordBytes),
+				zap.Int("max_message_bytes", msgTooLarge.MaxMessageBytes),
 			)
 		}
 	}
